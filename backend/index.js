@@ -3,14 +3,15 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import yahooFinance from 'yahoo-finance2';
 
-// --- LANGCHAIN / LANGGRAPH IMPORTS ---
+const yf = new yahooFinance();
+
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { StateGraph, END } from "@langchain/langgraph";
 import { TavilySearch } from "@langchain/tavily";
 import { SystemMessage, HumanMessage } from "@langchain/core/messages";
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
@@ -27,71 +28,58 @@ const io = new Server(httpServer, {
   }
 });
 
-// --- AI CONFIGURATION ---
-// Initialize the LLM (Using Google Gemini)
 const llm = new ChatGoogleGenerativeAI({
-    model: "gemini-2.5-flash", 
-    temperature: 0, // 0 ensures factual, deterministic answers
+    model: "gemini-2.5-flash",
+    temperature: 0,
     apiKey: process.env.GEMINI_API_KEY
 });
 
-// Initialize Tavily Search Tool
 const searchTool = new TavilySearch({
     maxResults: 3,
 });
 
-// --- 1. DEFINE THE STATE ---
-// This is the "memory" that gets passed between nodes.
 const agentState = {
-    company: {
-        value: null,
-    },
-    news: {
-        value: (x, y) => y, // Simply overwrite the previous news value
-        default: () => null,
-    },
-    financials: {
-        value: (x, y) => y,
-        default: () => null,
-    },
-    verdict: {
-        value: (x, y) => y,
-        default: () => null,
-    },
-    rationale: {
-        value: (x, y) => y,
-        default: () => null,
-    }
+    company: { value: null },
+    news: { value: (x, y) => y, default: () => null },
+    financials: { value: (x, y) => y, default: () => null },
+    verdict: { value: (x, y) => y, default: () => null },
+    rationale: { value: (x, y) => y, default: () => null }
 };
 
-// --- 2. DEFINE THE NODES (The steps in the workflow) ---
-
-// Node A: Search the web for recent news
 const searchNode = async (state) => {
     const { company } = state;
     const query = `recent financial news and market sentiment for ${company}`;
-    
-    // Call the Tavily tool with the correct schema key ('query' instead of 'input')
     const searchResults = await searchTool.invoke({ query: query });
-    
-    // Return updated state
     return { news: searchResults };
 };
 
-// Node B: Gather financial data
 const financialNode = async (state) => {
     const { company } = state;
-    
-    // Generate some "random" metrics to make the analysis unique
-    const peRatio = (Math.random() * (40 - 10) + 10).toFixed(2);
-    const growth = (Math.random() * (20 - 1) + 1).toFixed(1);
-    
-    const dynamicFinancials = `Current metrics for ${company}: Growth rate is ${growth}%. P/E ratio is ${peRatio}. Recent volatility is considered moderate to high.`;
-    
-    return { financials: dynamicFinancials };
+    try {
+        // First, search for the symbol to support names like "nvidia"
+        const searchResults = await yf.search(company);
+        if (!searchResults.quotes || searchResults.quotes.length === 0) {
+            return { financials: `No financial data found for ${company}.` };
+        }
+        
+        // Use the first result (most relevant match)
+        const symbol = searchResults.quotes[0].symbol;
+        const quote = await yf.quote(symbol);
+        
+        return { 
+            financials: `
+                Symbol: ${quote.symbol}
+                Current Price: ${quote.regularMarketPrice}
+                Market Cap: ${quote.marketCap}
+                Trailing P/E: ${quote.trailingPE}
+            ` 
+        };
+    } catch (error) {
+        console.error("Yahoo Finance Error:", error);
+        return { financials: "Unable to retrieve real-time financial data." };
+    }
 };
 
-// Node C: The LLM makes the final decision
 const decisionNode = async (state) => {
     const { company, news, financials } = state;
     
@@ -105,10 +93,10 @@ const decisionNode = async (state) => {
     Financial Metrics:
     ${financials}
 
-    You must respond ONLY with a valid JSON object in the following format. Do not include markdown formatting or backticks, just the raw JSON:
+    You must respond ONLY with a valid JSON object in the following format:
     {
         "verdict": "INVEST" or "PASS",
-        "rationale": "A 2-3 sentence explanation of your decision based on the provided data."
+        "rationale": "A 2-3 sentence explanation."
     }
     `;
 
@@ -117,83 +105,55 @@ const decisionNode = async (state) => {
         new HumanMessage(prompt)
     ]);
 
-    // Parse the JSON string returned by the LLM
     try {
-        const parsedDecision = JSON.parse(response.content.trim());
+        // Robust JSON parsing to handle potential markdown
+        const cleanContent = response.content.trim().replace(/```json/g, "").replace(/```/g, "");
+        const parsedDecision = JSON.parse(cleanContent);
         return { 
             verdict: parsedDecision.verdict, 
             rationale: parsedDecision.rationale 
         };
     } catch (error) {
-        console.error("Failed to parse LLM JSON:", response.content);
+        console.error("Decision Node Parsing Error:", error);
         return {
             verdict: "PASS",
-            rationale: "Error processing the final decision. Defaulting to PASS due to risk."
+            rationale: "Analysis failed due to a system error."
         };
     }
 };
 
-// --- 3. COMPILE THE GRAPH ---
 const workflow = new StateGraph({ channels: agentState })
     .addNode("search", searchNode)
     .addNode("gather_financials", financialNode)
     .addNode("decision", decisionNode)
-    
-    // Define the sequence of events
     .addEdge("search", "gather_financials")
     .addEdge("gather_financials", "decision")
     .addEdge("decision", END)
-    
-    // Set the starting point
     .setEntryPoint("search");
 
-// Compile it into an executable app
 const appAgent = workflow.compile();
 
-
-// --- WEBSOCKET CONNECTION ---
 io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id}`);
-
   socket.on('start_research', async (companyName) => {
-    console.log(`Starting research for: ${companyName}`);
-    
     try {
-        // We will emit status messages *before* running the graph for now, 
-        // to keep the frontend responsive while the LLM thinks.
-        socket.emit('agent_status', { step: 1, message: `Initializing research agent for ${companyName}...` });
+        socket.emit('agent_status', { step: 1, message: `Initializing research for ${companyName}...` });
+        socket.emit('agent_status', { step: 2, message: `Searching web for news...` });
+        const news = await searchNode({ company: companyName });
         
-        socket.emit('agent_status', { step: 2, message: `Searching the web via Tavily for recent news...` });
+        socket.emit('agent_status', { step: 3, message: `Fetching live stock data...` });
+        const financials = await financialNode({ company: companyName });
         
-        socket.emit('agent_status', { step: 3, message: `Analyzing financial data...` });
-        
-        socket.emit('agent_status', { step: 4, message: `Synthesizing data and generating final verdict...` });
+        socket.emit('agent_status', { step: 4, message: `Generating verdict...` });
+        const finalState = await decisionNode({ company: companyName, ...news, ...financials });
 
-        // RUN THE LANGGRAPH AGENT
-        // We pass in the initial state (just the company name)
-        const finalState = await appAgent.invoke({ company: companyName });
-
-        console.log("Agent finished. Final State:", finalState);
-
-        // Send the final result back to the React frontend
         socket.emit('research_complete', { 
-            company: finalState.company,
+            company: companyName,
             verdict: finalState.verdict, 
             rationale: finalState.rationale 
         });
-
     } catch (error) {
-        console.error("Agent Error:", error);
-        socket.emit('agent_status', { step: 'error', message: `Critical error during analysis: ${error.message}` });
-        socket.emit('research_complete', { 
-            verdict: "PASS", 
-            rationale: "Analysis failed due to a system error." 
-        });
+        socket.emit('research_complete', { verdict: "PASS", rationale: "System error: " + error.message });
     }
-  });
-
-  socket.on('disconnect', () => {
-    console.log(`User disconnected: ${socket.id}`);
   });
 });
 
