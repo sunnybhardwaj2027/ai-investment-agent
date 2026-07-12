@@ -1,147 +1,106 @@
 import { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
-// Connect to our Node.js backend running on port 3001
-const socket = io('http://localhost:3001');
+// FIX: Use environment variable for backend URL so it works locally AND live
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+const socket = io(BACKEND_URL);
 
 function App() {
-  const [companyName, setCompanyName] = useState('');
-  const [statusMessages, setStatusMessages] = useState([]);
-  const [isResearching, setIsResearching] = useState(false);
-  const [finalResult, setFinalResult] = useState(null);
+  const [company, setCompany] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  
+  // FIX: Using an array to track multiple statuses step-by-step
+  const [statuses, setStatuses] = useState([]);
 
   useEffect(() => {
-    // Listen for real-time progress updates from the backend agent
+    // Append new status messages to the list
     socket.on('agent_status', (data) => {
-      setStatusMessages((prev) => [...prev, data.message]);
+      setStatuses((prev) => [...prev, data.message]);
     });
-
-    // Listen for the final analysis verdict
+    
     socket.on('research_complete', (data) => {
-      setFinalResult(data);
-      setIsResearching(false); // Turn off the loading state
+      setResult(data);
+      setLoading(false);
     });
 
-    // Cleanup listeners when component unmounts
     return () => {
       socket.off('agent_status');
       socket.off('research_complete');
     };
   }, []);
 
-  const startResearch = (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
-    if (!companyName.trim()) return;
-
-    // Reset state for a new search
-    setStatusMessages([]);
-    setFinalResult(null);
-    setIsResearching(true);
-
-    // Tell the backend to start the LangGraph agent
-    socket.emit('start_research', companyName);
+    if (!company) return;
+    
+    setLoading(true);
+    setResult(null);
+    setStatuses([]); // Clear previous statuses
+    
+    socket.emit('start_research', company);
   };
 
   return (
-    <div style={{ 
-      fontFamily: 'system-ui, -apple-system, sans-serif', 
-      maxWidth: '700px', 
-      margin: '40px auto', 
-      padding: '30px',
-      backgroundColor: '#ffffff',
-      borderRadius: '16px',
-      boxShadow: '0 10px 25px rgba(0, 0, 0, 0.05)',
-      color: '#1a1a1a'
-    }}>
-      <h1 style={{ fontSize: '28px', marginBottom: '8px', color: '#111827' }}>
-        AI Investment Analyst 📈
-      </h1>
-      <p style={{ color: '#6b7280', marginBottom: '24px' }}>
-        Enter a company name to generate an Invest or Pass decision based on real-time market data.
-      </p>
+    <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans">
+      <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow-sm border border-slate-200 p-6 md:p-10">
+        <h1 className="text-3xl font-bold text-slate-900 mb-2">AI Investment Analyst 📈</h1>
+        <p className="text-slate-500 mb-8">Enter a company name to generate an Invest or Pass decision based on real-time market data.</p>
+        
+        <form onSubmit={handleSubmit} className="flex gap-3 mb-8">
+          <input 
+            className="flex-1 px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            value={company}
+            onChange={(e) => setCompany(e.target.value)}
+            placeholder="e.g., AAPL, nvidia..."
+          />
+          <button 
+            disabled={loading}
+            className="px-6 py-3 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-700 transition disabled:bg-blue-400"
+          >
+            {loading ? 'Analyzing...' : 'Analyze'}
+          </button>
+        </form>
 
-      <form onSubmit={startResearch} style={{ display: 'flex', gap: '12px', marginBottom: '32px' }}>
-        <input 
-          type="text" 
-          placeholder="e.g. Tesla, Apple, Nvidia" 
-          value={companyName}
-          onChange={(e) => setCompanyName(e.target.value)}
-          disabled={isResearching}
-          style={{ 
-            flex: 1, 
-            padding: '14px 16px', 
-            fontSize: '16px',
-            borderRadius: '8px',
-            border: '1px solid #e5e7eb',
-            outline: 'none',
-            transition: 'border-color 0.2s',
-          }}
-        />
-        <button 
-          type="submit" 
-          disabled={isResearching}
-          style={{ 
-            padding: '14px 28px', 
-            fontSize: '16px', 
-            fontWeight: '600',
-            cursor: isResearching ? 'not-allowed' : 'pointer',
-            backgroundColor: isResearching ? '#9ca3af' : '#2563eb',
-            color: 'white',
-            border: 'none',
-            borderRadius: '8px',
-            transition: 'background-color 0.2s'
-          }}
-        >
-          {isResearching ? 'Analyzing...' : 'Analyze'}
-        </button>
-      </form>
+        {/* AGENT THOUGHT PROCESS LIST */}
+        {(statuses.length > 0) && (
+          <div className="bg-slate-50 p-6 rounded-2xl border border-slate-200 mb-6">
+            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4">Agent Thought Process</h3>
+            <div className="space-y-3">
+              {statuses.map((status, index) => (
+                <div key={index} className="flex items-center text-slate-700">
+                  <span className="mr-3 animate-pulse">⏳</span> {status}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
-      {}
-      {statusMessages.length > 0 && (
-        <div style={{ 
-          background: '#f9fafb', 
-          border: '1px solid #f3f4f6',
-          padding: '20px', 
-          borderRadius: '12px', 
-          marginBottom: '24px' 
-        }}>
-          <h3 style={{ fontSize: '14px', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#4b5563', marginTop: 0, marginBottom: '16px' }}>
-            Agent Thought Process
-          </h3>
-          <ul style={{ listStyleType: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            {statusMessages.map((msg, idx) => (
-              <li key={idx} style={{ color: '#374151', fontSize: '15px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '12px' }}>⏳</span> {msg}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {}
-      {finalResult && (
-        <div style={{ 
-          background: finalResult.verdict === 'INVEST' ? '#f0fdf4' : '#fef2f2', 
-          border: `2px solid ${finalResult.verdict === 'INVEST' ? '#22c55e' : '#ef4444'}`,
-          padding: '24px', 
-          borderRadius: '12px',
-          animation: 'fadeIn 0.5s ease-in-out'
-        }}>
-          <h2 style={{ 
-            marginTop: 0, 
-            marginBottom: '12px',
-            color: finalResult.verdict === 'INVEST' ? '#166534' : '#991b1b',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px'
-          }}>
-            Verdict: {finalResult.verdict} {finalResult.verdict === 'INVEST' ? '🚀' : '🛑'}
-          </h2>
-          <p style={{ margin: 0, color: '#374151', lineHeight: '1.6' }}>
-            <strong>Rationale:</strong> {finalResult.rationale}
-          </p>
-        </div>
-      )}
+        {/* FINAL VERDICT & CHART */}
+        {result && !loading && (
+          <div className={`p-6 rounded-2xl border ${result.verdict === 'INVEST' ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'}`}>
+            <h2 className={`text-2xl font-bold mb-3 ${result.verdict === 'INVEST' ? 'text-green-700' : 'text-red-700'}`}>
+              Verdict: {result.verdict} {result.verdict === 'INVEST' ? '✅' : '🛑'}
+            </h2>
+            <p className="text-slate-800 leading-relaxed mb-6"><strong className="font-semibold">Rationale:</strong> {result.rationale}</p>
+            
+            {result.historicalData && result.historicalData.length > 0 && (
+              <div className="h-64 w-full bg-white p-4 rounded-xl border border-slate-200 shadow-sm mt-6">
+                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4">30-Day Price Trend</h3>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={result.historicalData}>
+                    <XAxis dataKey="date" hide />
+                    <YAxis domain={['auto', 'auto']} hide />
+                    <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
+                    <Line type="monotone" dataKey="price" stroke={result.verdict === 'INVEST' ? '#16a34a' : '#dc2626'} strokeWidth={3} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
